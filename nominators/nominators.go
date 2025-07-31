@@ -1,4 +1,4 @@
-package main
+package nominators
 
 import (
 	"bytes"
@@ -7,8 +7,11 @@ import (
 	"sync"
 	"sync/atomic"
 
+	gsrpc "github.com/centrifuge/go-substrate-rpc-client/v4"
 	"github.com/centrifuge/go-substrate-rpc-client/v4/scale"
 	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
+	stypes "github.com/stake-plus/npos-calculator/types"
+	"github.com/stake-plus/npos-calculator/utils"
 	"github.com/vedhavyas/go-subkey"
 )
 
@@ -18,18 +21,30 @@ type NominatorWork struct {
 }
 
 type NominatorResult struct {
-	nominator *Nominator
+	nominator *stypes.Nominator
 	err       error
 }
 
-func (p *PolkadotAPI) fetchNominators(meta *types.Metadata) ([]Nominator, error) {
+type Fetcher struct {
+	api        *gsrpc.SubstrateAPI
+	ss58Prefix uint16
+}
+
+func NewFetcher(api *gsrpc.SubstrateAPI, ss58Prefix uint16) *Fetcher {
+	return &Fetcher{
+		api:        api,
+		ss58Prefix: ss58Prefix,
+	}
+}
+
+func (f *Fetcher) FetchNominators(meta *types.Metadata) ([]stypes.Nominator, error) {
 	fmt.Println("Fetching nominators...")
 
 	// Create storage key prefix
-	prefix := createStorageKeyPrefix("Staking", "Nominators")
+	prefix := utils.CreateStorageKeyPrefix("Staking", "Nominators")
 
 	// Query all nominator keys
-	keys, err := p.api.RPC.State.GetKeysLatest(prefix)
+	keys, err := f.api.RPC.State.GetKeysLatest(prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -46,29 +61,26 @@ func (p *PolkadotAPI) fetchNominators(meta *types.Metadata) ([]Nominator, error)
 	// Start workers
 	numWorkers := 200
 	var wg sync.WaitGroup
-
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
-		go func(workerID int) {
+		go func() {
 			defer wg.Done()
-			p.nominatorWorker(workerID, meta, workQueue, results, &processed, &errorCount, &skipped)
-		}(i)
+			f.nominatorWorker(meta, workQueue, results, &processed, &errorCount, &skipped)
+		}()
 	}
 
 	// Start result collector
-	nominators := make([]Nominator, 0, len(keys))
+	nominators := make([]stypes.Nominator, 0, len(keys))
 	done := make(chan bool)
-
 	go func() {
 		for result := range results {
 			if result.err == nil && result.nominator != nil {
 				nominators = append(nominators, *result.nominator)
-
 				count := int(processed.Load())
 				if count <= 3 {
 					fmt.Printf("Nominator %s: stake=%s, targets=%d\n",
 						result.nominator.AccountID[:8]+"...",
-						formatBalance(result.nominator.Stake),
+						utils.FormatBalance(result.nominator.Stake),
 						len(result.nominator.Targets))
 				} else if count%1000 == 0 {
 					fmt.Printf("Processed %d nominators...\n", count)
@@ -80,7 +92,7 @@ func (p *PolkadotAPI) fetchNominators(meta *types.Metadata) ([]Nominator, error)
 
 	// Queue work
 	for _, storageKey := range keys {
-		accountID := extractAccountFromStorageKey(storageKey)
+		accountID := utils.ExtractAccountFromStorageKey(storageKey)
 		if len(accountID) == 32 {
 			workQueue <- NominatorWork{
 				storageKey: storageKey,
@@ -90,19 +102,19 @@ func (p *PolkadotAPI) fetchNominators(meta *types.Metadata) ([]Nominator, error)
 			errorCount.Add(1)
 		}
 	}
-
 	close(workQueue)
+
 	wg.Wait()
 	close(results)
 	<-done
 
 	fmt.Printf("Successfully loaded %d nominators (errors: %d, skipped: %d)\n",
 		len(nominators), errorCount.Load(), skipped.Load())
+
 	return nominators, nil
 }
 
-func (p *PolkadotAPI) nominatorWorker(
-	workerID int,
+func (f *Fetcher) nominatorWorker(
 	meta *types.Metadata,
 	workQueue <-chan NominatorWork,
 	results chan<- NominatorResult,
@@ -110,11 +122,11 @@ func (p *PolkadotAPI) nominatorWorker(
 ) {
 	for work := range workQueue {
 		// Convert to SS58 address using the chain's prefix
-		address := subkey.SS58Encode(work.accountID, p.ss58Prefix)
+		address := subkey.SS58Encode(work.accountID, f.ss58Prefix)
 
 		// Get nominations
-		var nominations Nominations
-		ok, err := p.api.RPC.State.GetStorageLatest(work.storageKey, &nominations)
+		var nominations stypes.Nominations
+		ok, err := f.api.RPC.State.GetStorageLatest(work.storageKey, &nominations)
 		if err != nil || !ok {
 			errorCount.Add(1)
 			continue
@@ -127,7 +139,7 @@ func (p *PolkadotAPI) nominatorWorker(
 		}
 
 		// Get real staking info
-		stake, err := p.getStakingInfoSafe(meta, work.accountID)
+		stake, err := f.GetStakingInfoSafe(meta, work.accountID)
 		if err != nil || stake == nil || stake.Cmp(big.NewInt(0)) == 0 {
 			skipped.Add(1)
 			continue
@@ -136,25 +148,24 @@ func (p *PolkadotAPI) nominatorWorker(
 		// Convert targets to addresses using the chain's prefix
 		targets := make([]string, 0, len(nominations.Targets))
 		for _, target := range nominations.Targets {
-			targetAddress := subkey.SS58Encode(target[:], p.ss58Prefix)
+			targetAddress := subkey.SS58Encode(target[:], f.ss58Prefix)
 			targets = append(targets, targetAddress)
 		}
 
 		results <- NominatorResult{
-			nominator: &Nominator{
+			nominator: &stypes.Nominator{
 				AccountID: address,
 				Stake:     stake,
 				Targets:   targets,
 			},
 			err: nil,
 		}
-
 		processed.Add(1)
 	}
 }
 
-// Safe version that handles decoding errors
-func (p *PolkadotAPI) getStakingInfoSafe(meta *types.Metadata, accountID []byte) (*big.Int, error) {
+// GetStakingInfoSafe handles decoding errors
+func (f *Fetcher) GetStakingInfoSafe(meta *types.Metadata, accountID []byte) (*big.Int, error) {
 	// Get bonded controller
 	bondedKey, err := types.CreateStorageKey(meta, "Staking", "Bonded", accountID)
 	if err != nil {
@@ -162,7 +173,7 @@ func (p *PolkadotAPI) getStakingInfoSafe(meta *types.Metadata, accountID []byte)
 	}
 
 	var raw types.StorageDataRaw
-	exists, err := p.api.RPC.State.GetStorageLatest(bondedKey, &raw)
+	exists, err := f.api.RPC.State.GetStorageLatest(bondedKey, &raw)
 	if err != nil || !exists || len(raw) == 0 {
 		return nil, fmt.Errorf("no bonded controller")
 	}
@@ -180,7 +191,7 @@ func (p *PolkadotAPI) getStakingInfoSafe(meta *types.Metadata, accountID []byte)
 	}
 
 	var ledgerRaw types.StorageDataRaw
-	exists, err = p.api.RPC.State.GetStorageLatest(ledgerKey, &ledgerRaw)
+	exists, err = f.api.RPC.State.GetStorageLatest(ledgerKey, &ledgerRaw)
 	if err != nil || !exists || len(ledgerRaw) == 0 {
 		return nil, fmt.Errorf("no ledger data")
 	}
@@ -212,8 +223,4 @@ func (p *PolkadotAPI) getStakingInfoSafe(meta *types.Metadata, accountID []byte)
 	// Convert UCompact to big.Int
 	activeAmount := active.Int64()
 	return big.NewInt(activeAmount), nil
-}
-
-func (p *PolkadotAPI) getStakingInfo(meta *types.Metadata, accountID []byte) (*big.Int, error) {
-	return p.getStakingInfoSafe(meta, accountID)
 }

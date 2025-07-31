@@ -1,4 +1,4 @@
-package main
+package validators
 
 import (
 	"fmt"
@@ -6,7 +6,11 @@ import (
 	"sync"
 	"sync/atomic"
 
+	gsrpc "github.com/centrifuge/go-substrate-rpc-client/v4"
 	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
+	"github.com/stake-plus/npos-calculator/nominators"
+	stypes "github.com/stake-plus/npos-calculator/types"
+	"github.com/stake-plus/npos-calculator/utils"
 	"github.com/vedhavyas/go-subkey"
 )
 
@@ -16,18 +20,30 @@ type ValidatorWork struct {
 }
 
 type ValidatorResult struct {
-	validator *Validator
+	validator *stypes.Validator
 	err       error
 }
 
-func (p *PolkadotAPI) fetchValidators(meta *types.Metadata) ([]Validator, error) {
+type Fetcher struct {
+	api        *gsrpc.SubstrateAPI
+	ss58Prefix uint16
+}
+
+func NewFetcher(api *gsrpc.SubstrateAPI, ss58Prefix uint16) *Fetcher {
+	return &Fetcher{
+		api:        api,
+		ss58Prefix: ss58Prefix,
+	}
+}
+
+func (f *Fetcher) FetchValidators(meta *types.Metadata) ([]stypes.Validator, error) {
 	fmt.Println("Fetching validators...")
 
 	// Create storage key prefix
-	prefix := createStorageKeyPrefix("Staking", "Validators")
+	prefix := utils.CreateStorageKeyPrefix("Staking", "Validators")
 
 	// Query all validator keys
-	keys, err := p.api.RPC.State.GetKeysLatest(prefix)
+	keys, err := f.api.RPC.State.GetKeysLatest(prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -44,32 +60,29 @@ func (p *PolkadotAPI) fetchValidators(meta *types.Metadata) ([]Validator, error)
 	// Start workers
 	numWorkers := 10
 	var wg sync.WaitGroup
-
 	for i := 0; i < numWorkers; i++ {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
-			p.validatorWorker(workerID, meta, workQueue, results, &successCount, &errorCount)
+			f.validatorWorker(workerID, meta, workQueue, results, &successCount, &errorCount)
 		}(i)
 	}
 
 	// Start result collector
-	validators := make([]Validator, 0, len(keys))
+	validators := make([]stypes.Validator, 0, len(keys))
 	done := make(chan bool)
 	debugCount := 0
-
 	go func() {
 		for result := range results {
 			if result.err == nil && result.validator != nil {
 				validators = append(validators, *result.validator)
-
 				count := int(successCount.Load())
 				if debugCount < 5 {
 					// Display commission as percentage (perbill / 10,000,000)
 					commissionPercent := float64(result.validator.Commission) / 10000000.0
 					fmt.Printf("Validator %s: stake=%s, commission=%.1f%%\n",
 						result.validator.AccountID[:8]+"...",
-						formatBalance(result.validator.SelfStake),
+						utils.FormatBalance(result.validator.SelfStake),
 						commissionPercent)
 					debugCount++
 				} else if count%100 == 0 {
@@ -82,7 +95,7 @@ func (p *PolkadotAPI) fetchValidators(meta *types.Metadata) ([]Validator, error)
 
 	// Queue work
 	for _, storageKey := range keys {
-		accountID := extractAccountFromStorageKey(storageKey)
+		accountID := utils.ExtractAccountFromStorageKey(storageKey)
 		if len(accountID) == 32 {
 			workQueue <- ValidatorWork{
 				storageKey: storageKey,
@@ -92,30 +105,34 @@ func (p *PolkadotAPI) fetchValidators(meta *types.Metadata) ([]Validator, error)
 			errorCount.Add(1)
 		}
 	}
-
 	close(workQueue)
+
 	wg.Wait()
 	close(results)
 	<-done
 
 	fmt.Printf("Successfully loaded %d validators (errors: %d)\n", len(validators), errorCount.Load())
+
 	return validators, nil
 }
 
-func (p *PolkadotAPI) validatorWorker(
+func (f *Fetcher) validatorWorker(
 	workerID int,
 	meta *types.Metadata,
 	workQueue <-chan ValidatorWork,
 	results chan<- ValidatorResult,
 	successCount, errorCount *atomic.Int32,
 ) {
+	// Create nominator fetcher for staking info
+	nomFetcher := nominators.NewFetcher(f.api, f.ss58Prefix)
+
 	for work := range workQueue {
 		// Convert to SS58 address using the chain's prefix
-		address := subkey.SS58Encode(work.accountID, p.ss58Prefix)
+		address := subkey.SS58Encode(work.accountID, f.ss58Prefix)
 
 		// Get validator preferences
-		var prefs ValidatorPrefs
-		ok, err := p.api.RPC.State.GetStorageLatest(work.storageKey, &prefs)
+		var prefs stypes.ValidatorPrefs
+		ok, err := f.api.RPC.State.GetStorageLatest(work.storageKey, &prefs)
 		if err != nil || !ok {
 			errorCount.Add(1)
 			continue
@@ -133,13 +150,13 @@ func (p *PolkadotAPI) validatorWorker(
 
 		// Get real staking info
 		stake := big.NewInt(0)
-		stakeAmount, err := p.getStakingInfoSafe(meta, work.accountID)
+		stakeAmount, err := nomFetcher.GetStakingInfoSafe(meta, work.accountID)
 		if err == nil && stakeAmount != nil {
 			stake = stakeAmount
 		}
 
 		results <- ValidatorResult{
-			validator: &Validator{
+			validator: &stypes.Validator{
 				AccountID:  address,
 				SelfStake:  stake,
 				TotalStake: stake,
@@ -148,7 +165,6 @@ func (p *PolkadotAPI) validatorWorker(
 			},
 			err: nil,
 		}
-
 		successCount.Add(1)
 	}
 }

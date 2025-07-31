@@ -1,4 +1,4 @@
-package main
+package utils
 
 import (
 	"fmt"
@@ -8,7 +8,7 @@ import (
 	"github.com/centrifuge/go-substrate-rpc-client/v4/xxhash"
 )
 
-func createStorageKeyPrefix(module, storage string) types.StorageKey {
+func CreateStorageKeyPrefix(module, storage string) types.StorageKey {
 	// Create the key prefix using xxhash
 	moduleHash := xxhash.New128([]byte(module)).Sum(nil)
 	storageHash := xxhash.New128([]byte(storage)).Sum(nil)
@@ -21,11 +21,10 @@ func createStorageKeyPrefix(module, storage string) types.StorageKey {
 	return types.StorageKey(prefix)
 }
 
-func extractAccountFromStorageKey(key types.StorageKey) []byte {
+func ExtractAccountFromStorageKey(key types.StorageKey) []byte {
 	// The storage key format for maps:
 	// [16 bytes module hash][16 bytes storage hash][hasher data][key data]
 	// For Twox64Concat: [8 bytes hash][32 bytes account ID]
-
 	keyBytes := []byte(key)
 
 	// Check if we have enough bytes
@@ -40,7 +39,7 @@ func extractAccountFromStorageKey(key types.StorageKey) []byte {
 	return accountBytes
 }
 
-func formatBalance(balance *big.Int) string {
+func FormatBalance(balance *big.Int) string {
 	if balance == nil {
 		return "0 DOT"
 	}

@@ -1,10 +1,13 @@
-package main
+package rpc
 
 import (
 	"fmt"
 
 	gsrpc "github.com/centrifuge/go-substrate-rpc-client/v4"
 	"github.com/centrifuge/go-substrate-rpc-client/v4/types"
+	"github.com/stake-plus/npos-calculator/nominators"
+	stypes "github.com/stake-plus/npos-calculator/types"
+	"github.com/stake-plus/npos-calculator/validators"
 )
 
 type PolkadotAPI struct {
@@ -30,7 +33,7 @@ func (p *PolkadotAPI) Close() {
 	}
 }
 
-func (p *PolkadotAPI) FetchChainData() (*ChainData, error) {
+func (p *PolkadotAPI) FetchChainData() (*stypes.ChainData, error) {
 	fmt.Println("Fetching chain data...")
 
 	// Get metadata
@@ -89,20 +92,22 @@ func (p *PolkadotAPI) FetchChainData() (*ChainData, error) {
 	fmt.Printf("Current era: %d, Validator count: %d\n", era, validatorCount)
 
 	// Fetch validators with concurrency
-	validators, err := p.fetchValidators(meta)
+	validatorFetcher := validators.NewFetcher(p.api, p.ss58Prefix)
+	validatorList, err := validatorFetcher.FetchValidators(meta)
 	if err != nil {
 		return nil, err
 	}
 
 	// Fetch nominators with concurrency
-	nominators, err := p.fetchNominators(meta)
+	nominatorFetcher := nominators.NewFetcher(p.api, p.ss58Prefix)
+	nominatorList, err := nominatorFetcher.FetchNominators(meta)
 	if err != nil {
 		return nil, err
 	}
 
-	return &ChainData{
-		Validators:     validators,
-		Nominators:     nominators,
+	return &stypes.ChainData{
+		Validators:     validatorList,
+		Nominators:     nominatorList,
 		ValidatorCount: uint32(validatorCount),
 		Era:            uint32(era),
 	}, nil
@@ -123,6 +128,5 @@ func (p *PolkadotAPI) getSS58Prefix(meta *types.Metadata) (uint16, error) {
 			}
 		}
 	}
-
 	return 0, fmt.Errorf("SS58Prefix constant not found")
 }

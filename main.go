@@ -4,11 +4,15 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+
+	"github.com/stake-plus/npos-calculator/elections"
+	"github.com/stake-plus/npos-calculator/rpc"
+	"github.com/stake-plus/npos-calculator/utils"
 )
 
 func main() {
 	// Create Polkadot API client
-	api, err := NewPolkadotAPI("wss://polkadot.dotters.network")
+	api, err := rpc.NewPolkadotAPI("wss://polkadot.dotters.network")
 	if err != nil {
 		log.Fatal("Failed to connect:", err)
 	}
@@ -26,12 +30,12 @@ func main() {
 
 	// Run NPoS election algorithm
 	fmt.Println("Running NPoS election algorithm...")
-	election := NewElection(chainData)
+	election := elections.NewElection(chainData)
 	assignments := election.Run()
 
 	// Calculate likelihood scores
 	fmt.Println("Calculating likelihood scores...")
-	scores := CalculateLikelihoodScores(assignments, chainData)
+	scores := elections.CalculateLikelihoodScores(assignments, chainData)
 
 	// Display results
 	fmt.Printf("\nTop 800 Validator Rankings:\n")
@@ -69,7 +73,7 @@ func main() {
 		fmt.Printf("%-5d %-12s %-12s %-8d %-11s %-10s (%.1f%% commission)\n",
 			i+1,
 			score.ValidatorID[:12]+"...",
-			formatBalance(score.TotalStake),
+			utils.FormatBalance(score.TotalStake),
 			score.BackingCount,
 			fmt.Sprintf("%.2f%%", score.Likelihood*100),
 			status,
@@ -102,5 +106,5 @@ func main() {
 	fmt.Printf("Showing top: %d\n", maxDisplay)
 	fmt.Printf("Active validators (in top %d): %d\n", maxDisplay, activeCount)
 	fmt.Printf("Waiting validators (in top %d): %d\n", maxDisplay, waitingCount)
-	fmt.Printf("Minimum stake for active set: %s\n", formatBalance(minStake))
+	fmt.Printf("Minimum stake for active set: %s\n", utils.FormatBalance(minStake))
 }

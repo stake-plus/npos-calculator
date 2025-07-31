@@ -1,4 +1,4 @@
-package main
+package elections
 
 import (
 	"fmt"
@@ -6,10 +6,12 @@ import (
 	"math/big"
 	"sort"
 	"sync"
+
+	"github.com/stake-plus/npos-calculator/types"
 )
 
 type Election struct {
-	chainData   *ChainData
+	chainData   *types.ChainData
 	edges       []Edge
 	assignments map[string]*Assignment
 	mu          sync.RWMutex
@@ -39,7 +41,7 @@ type ValidatorScore struct {
 	Likelihood   float64
 }
 
-func NewElection(chainData *ChainData) *Election {
+func NewElection(chainData *types.ChainData) *Election {
 	return &Election{
 		chainData:   chainData,
 		edges:       make([]Edge, 0),
@@ -83,7 +85,6 @@ func (e *Election) initializeEdges() {
 	chunkSize := (len(e.chainData.Nominators) + numWorkers - 1) / numWorkers
 
 	var wg sync.WaitGroup
-
 	for i := 0; i < numWorkers; i++ {
 		start := i * chunkSize
 		end := start + chunkSize
@@ -92,9 +93,8 @@ func (e *Election) initializeEdges() {
 		}
 
 		wg.Add(1)
-		go func(nominators []Nominator) {
+		go func(nominators []types.Nominator) {
 			defer wg.Done()
-
 			localEdges := make([]Edge, 0, len(nominators)*10)
 
 			for _, nominator := range nominators {
@@ -123,7 +123,6 @@ func (e *Election) initializeEdges() {
 					}
 				}
 			}
-
 			edgeChan <- localEdges
 		}(e.chainData.Nominators[start:end])
 	}
@@ -225,7 +224,7 @@ func (e *Election) runSequentialPhragmen() {
 	e.loadsToWeights(nominatorLoad)
 }
 
-func (e *Election) loadsToWeights(nominatorLoad map[string]float64) {
+func (e *Election) loadsToWeights(_ map[string]float64) {
 	// Group edges by nominator
 	edgesByNominator := make(map[string][]*Edge)
 	for i := range e.edges {
@@ -344,14 +343,12 @@ func (e *Election) balanceLoads() {
 			diff := new(big.Int).Sub(maxStake, minStake)
 			diffFloat := new(big.Float).SetInt(diff)
 			minFloat := new(big.Float).SetInt(minStake)
-
 			ratio := new(big.Float).Quo(diffFloat, minFloat)
 			ratioFloat, _ := ratio.Float64()
 
 			if ratioFloat > tolerance {
 				// Transfer some stake from max to min
 				transferAmount := new(big.Int).Div(diff, big.NewInt(4))
-
 				if transferAmount.Cmp(maxEdge.Weight) > 0 {
 					transferAmount = new(big.Int).Div(maxEdge.Weight, big.NewInt(2))
 				}
@@ -380,7 +377,7 @@ func (e *Election) balanceLoads() {
 	}
 }
 
-func CalculateLikelihoodScores(assignments map[string]*Assignment, chainData *ChainData) []ValidatorScore {
+func CalculateLikelihoodScores(assignments map[string]*Assignment, chainData *types.ChainData) []ValidatorScore {
 	scores := make([]ValidatorScore, 0, len(chainData.Validators))
 
 	// First, calculate total potential stake for ALL validators
@@ -438,7 +435,6 @@ func CalculateLikelihoodScores(assignments map[string]*Assignment, chainData *Ch
 		if scores[i].BackedStake.Cmp(big.NewInt(0)) > 0 && scores[j].BackedStake.Cmp(big.NewInt(0)) > 0 {
 			return scores[i].BackedStake.Cmp(scores[j].BackedStake) > 0
 		}
-
 		// One elected, one not - elected comes first
 		if scores[i].BackedStake.Cmp(big.NewInt(0)) > 0 {
 			return true
@@ -446,7 +442,6 @@ func CalculateLikelihoodScores(assignments map[string]*Assignment, chainData *Ch
 		if scores[j].BackedStake.Cmp(big.NewInt(0)) > 0 {
 			return false
 		}
-
 		// Both non-elected - sort by total stake
 		return scores[i].TotalStake.Cmp(scores[j].TotalStake) > 0
 	})
@@ -457,7 +452,7 @@ func CalculateLikelihoodScores(assignments map[string]*Assignment, chainData *Ch
 		if scores[i].Likelihood == 0 {
 			if i < activeSetSize {
 				// Would be elected based on current ranking
-				scores[i].Likelihood = 0.9 - (float64(i) / float64(activeSetSize) * 0.3)
+				scores[i].Likelihood = 0.9 - (float64(i)/float64(activeSetSize))*0.3
 			} else {
 				// Outside active set
 				position := i - activeSetSize + 1
